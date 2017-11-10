@@ -12,6 +12,12 @@ bid_price=0.5
 key_name=aws-key-$name
 
 instance_domain_name=dev.aws
+dns_file_path="/private/etc/hosts"
+persistent_volume_size=100 # Go
+persistent_mount_device="/dev/xvdh"
+persistent_mount_point="/home/ubuntu/persist"
+
+availability_zone="eu-west-1c"
 
 if [ ! -e "$config_path" ] ; then
     configfile_secured='/tmp/cool.cfg'
@@ -67,6 +73,18 @@ case $key in
     instance_domain_name="$2"
     shift # pass argument
     ;;
+    --persistent_volume_size)
+    persistent_volume_size="$2"
+    shift # pass argument
+    ;;
+    --persistent_mount_device)
+    persistent_mount_device="$2"
+    shift # pass argument
+    ;;
+    --persistent_mount_point)
+    persistent_mount_point="$2"
+    shift # pass argument
+    ;;
     *)
             # unknown option
     ;;
@@ -86,12 +104,15 @@ function set_config(){
 if [ "$command" == "config" ]; then
     echo "# config stored in $config_path"
     cat $config_path
+elif [ "$command" == "create_volume" ]; then
+    export persistent_volume_id=`aws ec2 create-volume --availability-zone $availability_zone --size $persistent_volume_size --volume-type gp2 --output text --query 'VolumeId'`
+    echo "persistent_volume_id $persistent_volume_id containing $persistent_volume_size"
+    set_config persistent_volume_id $persistent_volume_id
 elif [ "$command" == "set_ssh_config" ]; then
     echo "Host dev.aws" >> ~/.ssh/config
     echo "   StrictHostKeyChecking no" >> ~/.ssh/config
     echo "   UserKnownHostsFile=/dev/null" >> ~/.ssh/config
 elif [ "$command" == "set_dns_config" ]; then
-    dns_file_path="/private/etc/hosts"
     echo "Will modify $dns_file_path..."
     sed -i.bak "/$instance_domain_name/s/.*/$instance_ip     $instance_domain_name/" $dns_file_path
     echo "Result:"
@@ -128,7 +149,7 @@ elif [ "$command" == "start" ]; then
         {
           "DeviceName": "/dev/sda1",
           "Ebs": {
-            "DeleteOnTermination": false,
+            "DeleteOnTermination": true,
             "VolumeType": "gp2",
             "VolumeSize": $volume_size
           }
@@ -173,6 +194,56 @@ EOF
     set_config instance_id $instance_id
     set_config instance_ip $instance_ip
 
+    echo ""
+    echo "Add the IP to your DNS as $instance_domain_name by calling:"
+    echo "    sudo ml set_dns_config"
+    echo "(or run sed -i.bak \"/$instance_domain_name/s/.*/$instance_ip     $instance_domain_name/\" $dns_file_path) $dns_file_path"
+
+    echo ""
+    echo "Connect in ssh using:"
+    echo "    ssh ubuntu@$instance_domain_name"
+
+    if [ "$persistent_volume_id" == "" ]; then
+        echo "this instance will not persist anything."
+    else
+        echo "Attaching persistent volume $persistent_volume_id as $persistent_mount_device..."
+        aws ec2 attach-volume --volume-id $persistent_volume_id --instance-id $instance_id --device $persistent_mount_device
+        echo "Waiting for the volume to be attached attached..."
+        DATA_STATE="unknown"
+        until [ "$DATA_STATE" == "attached" ]; do
+          sleep 3
+          DATA_STATE=$(aws ec2 describe-volumes \
+            --filters \
+                Name=attachment.instance-id,Values=$instance_id \
+                Name=attachment.device,Values=/dev/sdh \
+            --query Volumes[].Attachments[].State \
+            --output text)
+        done
+
+        # cf https://www.karelbemelmans.com/2016/11/ec2-userdata-script-that-waits-for-volumes-to-be-properly-attached-before-proceeding/
+        echo "You may want to run the following commands to create a file system on the volume:"
+        echo "    if [ \"\$(sudo file -b -s $persistent_mount_device)\" == \"data\" ]; then"
+        echo "      sudo mkfs -t ext4 \"$persistent_mount_device\""
+        echo "    fi"
+
+        echo "Then you may want to mount the volume:"
+        echo "    mkdir -p $persistent_mount_point"
+        echo "    sudo mount $persistent_mount_device $persistent_mount_point"
+        echo "    sudo chown ubuntu:ubuntu persist"
+
+        echo "And you may even want to persist the volume in /etc/fstab so it gets mounted again"
+        echo "    '$persistent_mount_device $persistent_mount_point ext4 defaults,nofail 0 2' >> /etc/fstab"
+
+        echo ""
+        echo "Waiting for spot instance to be ok before mounting the attached volume..."
+        aws ec2 wait instance-status-ok --instance-ids $instance_id
+
+        echo "Mounting the attached volume:"
+        echo "ssh -t ubuntu@$instance_ip \"mkdir -p $persistent_mount_point; sudo mount $persistent_mount_device $persistent_mount_point; sudo chown ubuntu:ubuntu persist; touch imDone;\""
+        ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -t ubuntu@$instance_ip "mkdir -p $persistent_mount_point; sudo mount $persistent_mount_device $persistent_mount_point; sudo chown ubuntu:ubuntu persist; touch imDone;"
+    fi
+
+    echo ""
     echo "Waiting for spot instance to be ok... (you may simply interrupt the script)"
     aws ec2 wait instance-status-ok --instance-ids $instance_id
 else
