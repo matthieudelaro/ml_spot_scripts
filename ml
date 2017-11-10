@@ -239,7 +239,7 @@ EOF
         aws ec2 wait instance-status-ok --instance-ids $instance_id
 
         echo "Mounting the attached volume:"
-        echo "ssh -t ubuntu@$instance_ip \"mkdir -p $persistent_mount_point; sudo mount $persistent_mount_device $persistent_mount_point; sudo chown ubuntu:ubuntu persist; touch imDone;\""
+        echo "ssh -t ubuntu@$instance_ip \"mkdir -p $persistent_mount_point; sudo mount $persistent_mount_device $persistent_mount_point; sudo chown ubuntu:ubuntu persist;\""
         ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -t ubuntu@$instance_ip "mkdir -p $persistent_mount_point; sudo mount $persistent_mount_device $persistent_mount_point; sudo chown ubuntu:ubuntu persist; touch imDone;"
     fi
 
